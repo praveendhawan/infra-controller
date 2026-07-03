@@ -2526,6 +2526,10 @@ pub enum MachineValidationContext {
     Discovery,
     Cleanup,
     OnDemand,
+    // Runs an operator-registered agent once per machine while it is in the
+    // Ready state, in place (no reboot, no state transition). Used to run the
+    // hardware-inventory agent that reports to nico-admin-backend.
+    Monitoring,
 }
 
 impl AsRef<str> for MachineValidationContext {
@@ -2534,6 +2538,7 @@ impl AsRef<str> for MachineValidationContext {
             MachineValidationContext::Discovery => "Discovery",
             MachineValidationContext::Cleanup => "Cleanup",
             MachineValidationContext::OnDemand => "OnDemand",
+            MachineValidationContext::Monitoring => "Monitoring",
         }
     }
 }
