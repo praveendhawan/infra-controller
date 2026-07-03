@@ -35,8 +35,8 @@ use model::machine::{
 };
 use rpc::Timestamp;
 use rpc::forge::forge_server::Forge;
-use rpc::forge_agent_control_response::Action;
 use rpc::forge::{MachineValidationTestNextVersionRequest, MachineValidationTestVerfiedRequest};
+use rpc::forge_agent_control_response::Action;
 
 use crate::handlers::machine_validation::apply_config_on_startup;
 use crate::tests::common;
