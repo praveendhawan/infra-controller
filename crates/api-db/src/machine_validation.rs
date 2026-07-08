@@ -162,14 +162,38 @@ pub async fn create_new_run(
 
     crate::machine::update_machine_validation_id(machine_id, id, context, txn).await?;
 
-    // Reset machine validation health report into initial state
-    let health_report = health_report::HealthReport::empty(
-        health_report::HealthReport::MACHINE_VALIDATION_SOURCE.to_string(),
-    );
-    crate::machine::update_machine_validation_health_report(txn, machine_id, &health_report)
-        .await?;
+    // Monitoring runs are in-place inventory passes on an already-Ready machine;
+    // they must not disturb the machine's existing (passed) validation health.
+    if !matches!(context, MachineValidationContext::Monitoring) {
+        // Reset machine validation health report into initial state
+        let health_report = health_report::HealthReport::empty(
+            health_report::HealthReport::MACHINE_VALIDATION_SOURCE.to_string(),
+        );
+        crate::machine::update_machine_validation_health_report(txn, machine_id, &health_report)
+            .await?;
+    }
 
     Ok(id)
+}
+
+/// Returns true if a machine_validation run with the given context already
+/// exists for this machine. Used as a run-once latch: the Ready-arm scout poll
+/// handler issues a Monitoring (in-place, no-reboot) run exactly once per
+/// machine and returns noop thereafter.
+pub async fn exists_run_with_context(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+    context: MachineValidationContext,
+) -> Result<bool, DatabaseError> {
+    let query =
+        "SELECT EXISTS(SELECT 1 FROM machine_validation WHERE machine_id = $1 AND context = $2)";
+    let exists: bool = sqlx::query_scalar(query)
+        .bind(machine_id)
+        .bind(context.as_ref())
+        .fetch_one(&mut *txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+    Ok(exists)
 }
 
 pub async fn find<DB>(

@@ -20,8 +20,9 @@ use ::rpc::{forge as rpc, forge_agent_control_response as fac, scout_firmware_up
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
     BomValidating, CleanupContext, CleanupState, FailureCause, FailureDetails, FailureSource,
-    HostReprovisionState, InstanceState, MachineState, MachineValidatingState, ManagedHostState,
-    MeasuringState, StateMachineArea, ValidationState,
+    HostReprovisionState, InstanceState, MachineState, MachineValidatingState,
+    MachineValidationContext, MachineValidationFilter, ManagedHostState, MeasuringState,
+    StateMachineArea, ValidationState,
 };
 use model::machine_validation::{MachineValidationState, MachineValidationStatus};
 use tonic::{Request, Response, Status};
@@ -347,6 +348,51 @@ pub(crate) async fn forge_agent_control(
                 (action, Some(txn))
             }
 
+            ManagedHostState::Ready => {
+                // Run the operator-registered hardware-inventory agent once per
+                // machine, in place, while it is Ready. We answer the scout poll
+                // directly with a MachineValidation action and do NOT set the
+                // on-demand request flag, so the reboot state machine is never
+                // entered — the machine stays Ready. The Monitoring-context run
+                // is latched so it is issued exactly once per machine.
+                if db::machine_validation::exists_run_with_context(
+                    &mut txn,
+                    &machine_id,
+                    MachineValidationContext::Monitoring,
+                )
+                .await?
+                {
+                    (Action::noop(), Some(txn))
+                } else {
+                    let filter = MachineValidationFilter {
+                        tags: vec!["inventory".to_string()],
+                        ..Default::default()
+                    };
+                    // create_new_run sets state=Started; scout reports the final
+                    // state via machine_validation::completed. No InProgress write.
+                    let validation_id = db::machine_validation::create_new_run(
+                        &mut txn,
+                        &machine_id,
+                        MachineValidationContext::Monitoring,
+                        filter.clone(),
+                    )
+                    .await?;
+                    tracing::info!(
+                        machine_id = %machine.id,
+                        validation_id = %validation_id,
+                        "issuing in-place Monitoring inventory run (no reboot)",
+                    );
+                    (
+                        Action::MachineValidation(fac::MachineValidation {
+                            is_enabled: true,
+                            context: MachineValidationContext::Monitoring.to_string(),
+                            validation_id: Some(validation_id),
+                            filter: Some(filter.into()),
+                        }),
+                        Some(txn),
+                    )
+                }
+            }
             _ => {
                 // Later this might go to site admin dashboard for manual intervention
                 tracing::info!(

@@ -210,6 +210,20 @@ impl MachineValidation {
 
     pub async fn pull_container(image_name: &str) {
         tracing::info!(image_name);
+        // Air-gapped sites: if the image is already present locally (e.g. it was
+        // imported from the internal carbide-pxe.forge blob tar), skip the
+        // registry pull entirely so we never attempt an outbound/internet fetch.
+        let inspect = format!("nerdctl -n default image inspect {image_name} >/dev/null 2>&1");
+        if let Ok(result) = TokioCmd::new("sh")
+            .args(vec!["-c".to_string(), inspect])
+            .timeout(DEFAULT_TIMEOUT)
+            .output_with_timeout()
+            .await
+            && result.exit_code == 0
+        {
+            info!("image {image_name} already present locally; skipping pull");
+            return;
+        }
         let command_string = format!(" nerdctl -n default pull {image_name}");
         tracing::info!(command_string);
         match TokioCmd::new("sh")

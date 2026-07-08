@@ -23,9 +23,10 @@ use carbide_machine_controller::config::machine_validation::{
 };
 use carbide_uuid::machine_validation::MachineValidationId;
 use common::api_fixtures::{
-    TestEnvOverrides, create_host_with_machine_validation, create_test_env,
-    create_test_env_with_overrides, get_config, get_machine_validation_results,
-    get_machine_validation_runs, on_demand_machine_validation, update_machine_validation_run,
+    TestEnvOverrides, create_host_with_machine_validation, create_managed_host, create_test_env,
+    create_test_env_with_overrides, forge_agent_control, get_config,
+    get_machine_validation_results, get_machine_validation_runs, on_demand_machine_validation,
+    update_machine_validation_run,
 };
 use config_version::ConfigVersion;
 use model::machine::{
@@ -35,6 +36,7 @@ use model::machine::{
 use rpc::Timestamp;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{MachineValidationTestNextVersionRequest, MachineValidationTestVerfiedRequest};
+use rpc::forge_agent_control_response::Action;
 
 use crate::handlers::machine_validation::apply_config_on_startup;
 use crate::tests::common;
@@ -1680,6 +1682,87 @@ async fn test_machine_validation_tests_on_startup_missing_both_fields(
             test.test_id
         );
     }
+
+    Ok(())
+}
+
+/// A machine in the Ready state is issued a one-time, in-place Monitoring
+/// inventory run (no reboot, no state transition), latched so it fires exactly
+/// once per machine.
+#[crate::sqlx_test]
+async fn test_ready_state_issues_monitoring_run_once(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let mh = create_managed_host(&env).await;
+
+    // Helper: count Monitoring-context runs for the host.
+    async fn monitoring_run_count(
+        env: &common::api_fixtures::TestEnv,
+        machine_id: &carbide_uuid::machine::MachineId,
+    ) -> usize {
+        get_machine_validation_runs(env, machine_id, true)
+            .await
+            .runs
+            .iter()
+            .filter(|r| r.context.as_deref() == Some("Monitoring"))
+            .count()
+    }
+
+    // Precondition: fixture host is Ready with no Monitoring run yet.
+    {
+        let mut txn = env.pool.begin().await?;
+        let machine = mh.host().db_machine(&mut txn).await;
+        assert!(
+            matches!(machine.current_state(), ManagedHostState::Ready),
+            "fixture host not Ready: {:?}",
+            machine.current_state()
+        );
+    }
+    assert_eq!(
+        monitoring_run_count(&env, &mh.host().id).await,
+        0,
+        "expected no Monitoring run before the first poll"
+    );
+
+    // First poll: the Ready arm returns an in-place Monitoring validation.
+    let resp = forge_agent_control(&env, mh.host().id).await;
+    match resp.action {
+        Some(Action::MachineValidation(ref mv)) => {
+            assert_eq!(mv.context, "Monitoring", "wrong validation context");
+            assert!(mv.is_enabled, "expected an enabled validation");
+        }
+        other => panic!("expected Monitoring MachineValidation action, got {other:?}"),
+    }
+
+    // Exactly one Monitoring run exists, and the machine stayed Ready (no reboot).
+    assert_eq!(
+        monitoring_run_count(&env, &mh.host().id).await,
+        1,
+        "expected exactly one Monitoring run after the first poll"
+    );
+    {
+        let mut txn = env.pool.begin().await?;
+        let machine = mh.host().db_machine(&mut txn).await;
+        assert!(
+            matches!(machine.current_state(), ManagedHostState::Ready),
+            "machine left Ready (unexpected reboot/transition): {:?}",
+            machine.current_state()
+        );
+    }
+
+    // Second poll: the latch holds -> noop, and no second run is created.
+    let resp2 = forge_agent_control(&env, mh.host().id).await;
+    assert!(
+        matches!(resp2.action, Some(Action::Noop(_))),
+        "expected noop on the second poll, got {:?}",
+        resp2.action
+    );
+    assert_eq!(
+        monitoring_run_count(&env, &mh.host().id).await,
+        1,
+        "latch failed: a second Monitoring run was created"
+    );
 
     Ok(())
 }

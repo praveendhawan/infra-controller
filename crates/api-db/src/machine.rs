@@ -1933,15 +1933,18 @@ pub async fn update_machine_validation_id(
     context: MachineValidationContext,
     txn: &mut PgConnection,
 ) -> Result<MachineId, DatabaseError> {
+    let column = match context {
+        MachineValidationContext::Discovery => "discovery_machine_validation_id",
+        MachineValidationContext::Cleanup => "cleanup_machine_validation_id",
+        MachineValidationContext::OnDemand => "on_demand_machine_validation_id",
+        // Monitoring (in-place, Ready-state) runs are tracked directly in the
+        // machine_validation table (queried by context); there is no
+        // per-machine pointer column to update.
+        MachineValidationContext::Monitoring => return Ok(*machine_id),
+    };
     let mut builder = sqlx::QueryBuilder::new("UPDATE machines SET ");
     let query = builder
-        .push({
-            match context {
-                MachineValidationContext::Discovery => "discovery_machine_validation_id",
-                MachineValidationContext::Cleanup => "cleanup_machine_validation_id",
-                MachineValidationContext::OnDemand => "on_demand_machine_validation_id",
-            }
-        })
+        .push(column)
         .push("=")
         .push_bind(validation_id)
         .push(" WHERE id=")
